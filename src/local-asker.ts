@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Asker, AskSpec } from "./accept.js";
+import { verifyChecks, type Asker, type AskSpec } from "./accept.js";
 import type { Hunk } from "./diff.js";
 
 const NO = (reason: string) => ({ state: "no" as const, reason });
@@ -131,7 +131,7 @@ function changedFromPrompt(prompt: string): Array<{ id: string; where?: string }
 export function localAsker(): Asker {
   return {
     async ask(spec: AskSpec) {
-      if (spec.phase === "verify") return { supports: true };
+      if (spec.phase === "verify") return verifyChecks(spec.prompt);
       if (spec.phase === 0 && spec.id === "P1") {
         return {
           outcomes: [

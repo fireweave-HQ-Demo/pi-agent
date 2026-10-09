@@ -3,6 +3,58 @@ import path from "node:path";
 
 const SKIP = new Set([".git", "node_modules", "dist", "build", ".next", "coverage", "mirror.git"]);
 
+function filesUnder(root: string): string[] {
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (SKIP.has(name) || name.endsWith(".lock") || name.endsWith(".tgz")) continue;
+      const abs = path.join(dir, name);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(abs);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(abs);
+      else files.push(path.relative(root, abs));
+    }
+  };
+  walk(root);
+  return files;
+}
+
+/** Paths plus the files Phase 0 is allowed to read. Not a claim that other files are absent. */
+export function profileSources(root: string, limit = 32_000): string {
+  const files = filesUnder(root);
+  const picked = files.filter(
+    (f) =>
+      /(^|\/)README\.md$/.test(f) ||
+      /apps\/api\/src\/application\/.*\.ts$/.test(f) ||
+      /apps\/api\/src\/interfaces\/http\/router\.ts$/.test(f) ||
+      /apps\/api\/src\/infrastructure\/db\/.*\.ts$/.test(f) ||
+      /apps\/web\/src\/(App|Lobby|auth)\.tsx$/.test(f),
+  );
+  const chunks = [`PATHS\n${files.join("\n")}`];
+  for (const rel of picked) {
+    const abs = path.join(root, rel);
+    let text = "";
+    try {
+      text = fs.readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    chunks.push(`FILE ${rel}\n${text.slice(0, 6_000)}`);
+    if (chunks.join("\n\n").length > limit) break;
+  }
+  return chunks.join("\n\n").slice(0, limit);
+}
+
 /** Enough of the tree for one question. The model should not walk the disk. */
 export function snapshot(root: string, limit = 40_000): string {
   const files: string[] = [];
@@ -27,7 +79,7 @@ export function snapshot(root: string, limit = 40_000): string {
     }
   };
   walk(root);
-  const listing = `FILES\n${files.slice(0, 400).join("\n")}`;
+  const listing = `FILES\n${files.join("\n")}`;
   const prefer = files.filter((f) => /^(readme|package\.json|apps\/|packages\/|src\/)/i.test(f) || /\.(md|ts|tsx|js|json)$/.test(f));
   const chunks = [listing];
   for (const rel of prefer) {

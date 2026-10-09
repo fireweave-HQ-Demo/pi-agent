@@ -1,4 +1,4 @@
-import type { Asker, AskSpec } from "../src/accept.js";
+import { verifyChecks, type Asker, type AskSpec } from "../src/accept.js";
 
 const NO = (reason: string) => ({ state: "no", reason });
 
@@ -32,7 +32,7 @@ export function identityAsker(seen: AskSpec[]): Asker {
   return {
     async ask(spec: AskSpec) {
       seen.push(spec);
-      if (spec.phase === "verify") return spec.id === "batch" ? { supports: true } : { supports: true };
+      if (spec.phase === "verify") return verifyChecks(spec.prompt);
       if (spec.phase === 0 && spec.id === "P1") {
         return {
           outcomes: [
@@ -88,6 +88,15 @@ export function identityAsker(seen: AskSpec[]): Asker {
               core_path: { outcome_index: 1, path: "guard.ts:15 → accounts.ts:act → P1 outcome 1" },
             },
           ],
+        };
+      }
+      if (spec.phase === 5 && spec.id === "probes") {
+        return {
+          probes: (spec.ids ?? ["T1"]).map((topic) => ({
+            topic,
+            question: "does every handler behind requireRole intend moderators to pass?",
+            answer: "accounts.ts:act is the consumer of the widened check",
+          })),
         };
       }
       if (spec.phase === 5 && spec.id === "batch") {

@@ -44,7 +44,23 @@ function isContract(file: string): boolean {
  * skill.md §4, as a matcher over paths and hunk headers. Not a model call.
  * Runs only at the start of phase 5. It orders questions; it does not score.
  */
-export function classifyDiff(files: string[], hunks: Hunk[]): { types: string[]; order: string[] } {
+const PROBES: Record<string, string[]> = {
+  Feature: ["is the route reachable from ingress without the guard?", "is the input size bounded?"],
+  "Bug fix": ["does the old caller get the same value?", "what happens when the value is null?"],
+  Refactor: ["does the new code call the guard before the action?", "is the default the same?"],
+  Hardening: ["what does the new check do on error?", "is anything removed alongside the added check?"],
+  Migration: ["can the migration run twice?", "does an old reader handle the field being null?"],
+  Dependency: ["does the call still receive the same argument?"],
+  Config: ["what is used when the variable is unset?"],
+  "API / contract": ["does a client on the old format tolerate the field?", "do generated clients ship in the same deploy?"],
+  Revert: ["do rows written by the reverted code still parse?"],
+  Performance: ["does the cache key include the tenant?", "what does a miss or timeout return?"],
+  Test: ["is the fixture imported outside tests?"],
+  Docs: ["does anything load this file at runtime?"],
+  Chore: ["does the lint fix change a comparison or a default?"],
+};
+
+export function classifyDiff(files: string[], hunks: Hunk[]): { types: string[]; order: string[]; probes: string[] } {
   const hits: string[] = [];
   const add = (t: string) => {
     if (!hits.includes(t)) hits.push(t);
@@ -61,5 +77,5 @@ export function classifyDiff(files: string[], hunks: Hunk[]): { types: string[];
   if (sourceHunk && hits.length === 0) add("Bug fix");
   if (hits.length === 0) add("Chore");
   const order = hits.flatMap((t) => ORDER[t] ?? []);
-  return { types: hits, order };
+  return { types: hits, order, probes: hits.flatMap((t) => PROBES[t] ?? []) };
 }

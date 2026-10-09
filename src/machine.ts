@@ -4,6 +4,7 @@ import { accept, type Asker, type AskSpec, type FactAnswer } from "./accept.js";
 import { classifyDiff } from "./classify.js";
 import { parseUnifiedDiff, type Hunk } from "./diff.js";
 import { BASE, B_IDS, C_IDS, CRK_IDS, F_IDS, K_MULT, QUESTIONS, REACH_MULT } from "./questions.js";
+import { profileSources } from "./snapshot.js";
 import type { Trees } from "./accept.js";
 
 export interface RunInput {
@@ -13,28 +14,6 @@ export interface RunInput {
   cacheDir?: string;
 }
 
-function unknownFact(reason: string): FactAnswer {
-  return { state: "unknown", reason };
-}
-
-function fillMissing(topics: TopicRow[], containment: Record<string, FactAnswer & { verified?: boolean }>): void {
-  for (const topic of topics) {
-    for (const id of CRK_IDS) {
-      if (!topic.questions[id]?.state) topic.questions[id] = unknownFact("not answered");
-    }
-    if (!topic.interrogated) continue;
-    for (const id of F_IDS) {
-      if (!topic.questions[id]?.state) topic.questions[id] = unknownFact("not answered");
-    }
-  }
-  const scored = topics.some((t) => ungated(t) && t.interrogated);
-  if (scored) {
-    for (const id of B_IDS) {
-      if (!containment[id]?.state) containment[id] = unknownFact("not answered");
-    }
-  }
-}
-
 async function ask<T>(asker: Asker, spec: AskSpec): Promise<T> {
   const raw = await asker.ask(spec);
   return accept(spec, raw) as T;
@@ -42,6 +21,27 @@ async function ask<T>(asker: Asker, spec: AskSpec): Promise<T> {
 
 function prompt(lines: string[]): string {
   return lines.filter(Boolean).join("\n");
+}
+
+function region(root: string, citation: string | null | undefined): string {
+  if (!citation) return "";
+  const match = /^([^:]+):(\d+)/.exec(citation);
+  if (!match) return "";
+  const abs = path.join(root, match[1]);
+  if (!fs.existsSync(abs)) return "";
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return "";
+  }
+  if (!st.isFile()) return "";
+  const lines = fs.readFileSync(abs, "utf8").split("\n");
+  const at = Number(match[2]);
+  const start = Math.max(1, at - 30);
+  const end = Math.min(lines.length, at + 160);
+  const body = lines.slice(start - 1, end).map((line, i) => `${start + i}|${line}`).join("\n");
+  return `FILE ${match[1]}\n${body}`;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -66,25 +66,37 @@ interface TopicRow {
   probes: unknown[];
 }
 
+function countedYes(answer: FactAnswer & { verified?: boolean } | undefined): boolean {
+  return answer?.state === "yes" && answer.verified === true;
+}
+
 function ungated(t: TopicRow): boolean {
   if (!(t.change_test === "yes" && t.change_verified)) return false;
   if (t.direction === "narrower") return false;
-  const cYes = C_IDS.some((c) => t.questions[c]?.state === "yes" && t.questions[c]?.verified !== false);
-  if (!cYes) return false;
-  const reach = String(t.questions.R1?.state ?? "unknown");
-  return (REACH_MULT[reach] ?? 0) > 0;
+  if (!C_IDS.some((c) => countedYes(t.questions[c]))) return false;
+  const reach = t.questions.R1;
+  return reach?.verified === true && (REACH_MULT[String(reach.state)] ?? 0) > 0;
 }
 
 function rankOf(t: TopicRow): number {
   if (!ungated(t)) return 0;
   let best = 0;
   for (const c of C_IDS) {
-    const a = t.questions[c];
-    if (a?.state === "yes" && a.verified !== false) best = Math.max(best, BASE[c]);
+    if (countedYes(t.questions[c])) best = Math.max(best, BASE[c]);
   }
-  const k = String(t.questions.K?.state ?? "unknown");
-  const r = String(t.questions.R1?.state ?? "unknown");
-  return best * (K_MULT[k] ?? 1) * (REACH_MULT[r] ?? 0);
+  const k = t.questions.K?.state === "yes" && t.questions.K.verified === true ? K_MULT.yes : t.questions.K?.state === "no" ? K_MULT.no : K_MULT.unknown;
+  const reach = t.questions.R1;
+  const mult = reach?.verified === true ? (REACH_MULT[String(reach.state)] ?? 0) : 0;
+  return best * k * mult;
+}
+
+function orderIds(ids: string[], order: string[]): string[] {
+  const rank = (id: string) => {
+    const q = id.includes(".") ? id.split(".").pop()! : id;
+    const at = order.indexOf(q);
+    return at < 0 ? order.length : at;
+  };
+  return [...ids].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
 
 export async function analyze(input: RunInput, asker: Asker): Promise<Record<string, unknown>> {
@@ -117,55 +129,55 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       hunks: group,
       prompt: prompt([
         "Phase 1. Name the enclosing unit of each hunk in this batch.",
+        "If a hunk spans two units, return one row per unit. If the unit is outside the diff, use the file excerpt.",
         "Do not use the profile or the PR type.",
-        group.map((h) => `${h.id} ${h.file}\n${h.text.slice(0, 400)}`).join("\n\n"),
+        group.map((h) => `${h.id} ${h.file}\n${h.text}\n${region(trees.head, `${h.file}:${h.new_start}`)}`).join("\n\n"),
       ]),
     });
     units.push(...part);
   }
 
-  const hunksOut = hunks.map((h) => {
-    const u = units.find((x) => x.hunk === h.id) ?? {};
-    const enclosed = u.enclosed !== false && typeof u.unit === "string" && u.unit.length > 0;
-    return {
-      id: h.id,
-      file: h.file,
-      new_start: h.new_start,
-      new_lines: h.new_lines,
-      old_start: h.old_start,
-      old_lines: h.old_lines,
-      unit: enclosed ? u.unit : null,
-      unit_citation: enclosed ? u.unit_citation ?? null : null,
-      enclosed,
-    };
-  });
+  const hunksOut: Array<Record<string, unknown>> = [];
+  for (const h of hunks) {
+    const rows = units.filter((u) => u.hunk === h.id);
+    const use = rows.length ? rows : [{}];
+    use.forEach((u, index) => {
+      const enclosed = u.enclosed !== false && typeof u.unit === "string" && u.unit.length > 0;
+      hunksOut.push({
+        id: use.length > 1 ? `${h.id}.${index + 1}` : h.id,
+        file: h.file,
+        new_start: h.new_start,
+        new_lines: h.new_lines,
+        old_start: h.old_start,
+        old_lines: h.old_lines,
+        unit: enclosed ? u.unit : null,
+        unit_citation: enclosed ? u.unit_citation ?? null : null,
+        enclosed,
+      });
+    });
+  }
 
   const listed: Array<Record<string, unknown>> = [];
-  for (const group of chunk(hunksOut, 35)) {
+  for (const group of chunk(hunksOut, 8)) {
     const part = await ask<Array<Record<string, unknown>>>(asker, {
       phase: 2,
       id: "decisions",
       root: trees.head,
       hunk: "all",
-      hunks: group.map((h) => hunks.find((x) => x.id === h.id)).filter((h): h is (typeof hunks)[number] => Boolean(h)),
+      hunks: group
+        .map((h) => hunks.find((x) => x.id === String(h.id).replace(/\.\d+$/, "")))
+        .filter((h): h is (typeof hunks)[number] => Boolean(h)),
       prompt: prompt([
-        "Phase 2. At most one decision point per hunk. Pick the line that actually changed.",
+        "Phase 2. Enumerate every decision point on a changed line in this batch.",
         "Do not use the profile or the PR type.",
-        group.map((h) => `${h.id} unit ${String(h.unit)}\n${(hunks.find((x) => x.id === h.id)?.text ?? "").slice(0, 700)}`).join("\n\n"),
+        group
+          .map((h) => `${h.id} unit ${String(h.unit)}\n${hunks.find((x) => x.id === String(h.id).replace(/\.\d+$/, ""))?.text ?? ""}`)
+          .join("\n\n"),
       ]),
     });
     listed.push(...part);
   }
-  const picked: Array<Record<string, unknown>> = [];
-  const seenHunk = new Set<string>();
-  for (const d of listed) {
-    const hunk = String(d.hunk ?? hunksOut[0]?.id ?? "H1");
-    if (seenHunk.has(hunk)) continue;
-    seenHunk.add(hunk);
-    picked.push(d);
-    if (picked.length >= 24) break;
-  }
-  const drafted = picked.map((d, i) => ({
+  const drafted = listed.map((d, i) => ({
     id: `D${i + 1}`,
     hunk: String(d.hunk ?? hunksOut[0]?.id ?? "H1"),
     unit: hunksOut.find((h) => h.id === d.hunk)?.unit ?? d.unit,
@@ -173,14 +185,21 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
     kind: d.kind,
   }));
   const changeRows: Array<Record<string, unknown>> = [];
-  for (const group of chunk(drafted, 24)) {
+  for (const group of chunk(drafted, 8)) {
     const part = await ask<Array<Record<string, unknown>>>(asker, {
       phase: 3,
       id: "changes",
       root: trees.head,
       prompt: prompt([
-        "Phase 3. Change-test every decision in this batch. Answer only from before and after lines. No profile. No PR type.",
-        JSON.stringify(group),
+        "Phase 3. Change-test every decision in this batch. Answer only from the before and after lines below. No profile. No PR type.",
+        "no means the choice is the same. yes means it differs. ambiguous means the diff touches the unit and the difference is not clear.",
+        "neither is new code or a swap with no before choice. narrower only adds checks. wider only relaxes them.",
+        group
+          .map((d) => {
+            const text = hunks.find((h) => h.id === String(d.hunk).replace(/\.\d+$/, ""))?.text ?? "";
+            return `${JSON.stringify(d)}\n${text}`;
+          })
+          .join("\n\n"),
       ]),
     });
     changeRows.push(...part);
@@ -204,7 +223,7 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       unit: d.unit,
       where: d.where,
       kind: d.kind,
-      change: change.change === "yes" || change.change === "ambiguous" ? change.change : "no",
+      change: change.change === "yes" || change.change === "ambiguous" || change.change === "no" ? change.change : null,
       before: change.before ?? null,
       after: change.after ?? null,
       direction: change.direction ?? null,
@@ -255,6 +274,8 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
     if (topic && d.change === "ambiguous") topic.change_test = supports ? "yes" : "ambiguous";
   });
 
+  const files = [...new Set(hunks.map((h) => h.file))];
+  const typed = classifyDiff(files, hunks);
   const p1 = ((profile as { P1?: Array<{ outcome?: string }> }).P1 ?? []).map((o) => o.outcome).join(" | ");
   const p2 = JSON.stringify((profile as { P2?: unknown }).P2 ?? []);
   const p5 = JSON.stringify((profile as { P5?: unknown }).P5 ?? {});
@@ -268,10 +289,19 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       ids: crkIds,
       prompt: prompt([
         "Phase 5. Answer every C/R/K for every topic. No weights. No score.",
+        `Ask in this order when a topic has the question. The order does not skip any question and does not change the score. ${typed.order.join(", ") || "listed order"}.`,
         `P1: ${p1}`,
         `P2: ${p2}`,
-        topics.map((t) => `${t.id}: ${t.description} at ${t.where}`).join("\n"),
-        crkIds.map((id) => `${id}: ${QUESTIONS[id.split(".")[1] as keyof typeof QUESTIONS]}`).join("\n"),
+        topics
+          .map((t) =>
+            [
+              `${t.id}: ${t.description} at ${t.where}`,
+              region(trees.head, t.where),
+              region(trees.head, t.consumer.citation),
+            ].filter(Boolean).join("\n"),
+          )
+          .join("\n\n"),
+        orderIds(crkIds, typed.order).map((id) => `${id}: ${QUESTIONS[id.split(".")[1] as keyof typeof QUESTIONS]}`).join("\n"),
       ]),
     });
     for (const row of crk) {
@@ -287,7 +317,7 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
   const top = new Set(ranked.filter((t) => rankOf(t) > 0).slice(0, topN).map((t) => t.id));
   const fIds: string[] = [];
   for (const t of topics) {
-    t.interrogated = top.has(t.id);
+    t.interrogated = top.has(t.id) || t.change_test === "ambiguous";
     if (t.interrogated) for (const qid of F_IDS) fIds.push(`${t.id}.${qid}`);
   }
   if (fIds.length) {
@@ -297,10 +327,14 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       root: trees.head,
       ids: fIds,
       prompt: prompt([
-        "Phase 5. Answer every F question for the top topics. A yes must set meets_direction.",
+        "Phase 5. Answer every F question for the interrogated topics. A yes must set meets_direction.",
+        `Ask in this order when present. ${typed.order.join(", ") || "listed order"}.`,
         `P5: ${p5}`,
-        topics.filter((t) => t.interrogated).map((t) => `${t.id}: ${t.description}. Direction ${t.direction}.`).join("\n"),
-        fIds.map((id) => `${id}: ${QUESTIONS[id.split(".")[1] as keyof typeof QUESTIONS]}`).join("\n"),
+        topics
+          .filter((t) => t.interrogated)
+          .map((t) => [`${t.id}: ${t.description}. Direction ${t.direction}.`, region(trees.head, t.where)].filter(Boolean).join("\n"))
+          .join("\n\n"),
+        orderIds(fIds, typed.order).map((id) => `${id}: ${QUESTIONS[id.split(".")[1] as keyof typeof QUESTIONS]}`).join("\n"),
       ]),
     });
     for (const row of rows) {
@@ -311,6 +345,57 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
   }
   await verifyYeses(asker, topics, trees.head, p1);
 
+  const asked = topics.filter((t) => t.interrogated);
+  if (asked.length) {
+    const probes = await ask<Array<{ topic?: string; question?: string; action?: string; answer?: string; resolves?: string }>>(asker, {
+      phase: 5,
+      id: "probes",
+      root: trees.head,
+      ids: asked.map((t) => t.id),
+      prompt: prompt([
+        "Phase 5 probes. A probe has question, action, answer, and resolves.",
+        "action is the read, grep, or symbol lookup at head. resolves names the fixed question and the state, like F6 → no.",
+        "A probe does not score by itself. Templates, if any, only suggest where to look.",
+        typed.probes.join("\n"),
+        asked.map((t) => [`${t.id} ${t.description}`, region(trees.head, t.where)].filter(Boolean).join("\n")).join("\n\n"),
+      ]),
+    });
+    const raised: Array<{ id: string; citation: string; claim: string; topic: TopicRow; qid: string; previous: FactAnswer & { verified?: boolean } }> = [];
+    for (const row of probes) {
+      const topic = topics.find((t) => t.id === row.topic);
+      if (!topic) continue;
+      topic.probes.push({
+        question: String(row.question ?? ""),
+        action: String(row.action ?? ""),
+        answer: String(row.answer ?? ""),
+        resolves: String(row.resolves ?? ""),
+      });
+      const resolved = /^((?:C\d|R1|R2|K|F\d+|B\d+))\s*(?:→|->)\s*(yes|all|flag_or_cohort)/.exec(String(row.resolves ?? ""));
+      if (!resolved) continue;
+      const qid = resolved[1];
+      const cited = /([\w./-]+\.(?:ts|tsx|js|py|go|sql):\d+)/.exec(String(row.answer ?? ""));
+      raised.push({
+        id: `${topic.id}.${qid}`,
+        citation: cited?.[1] ?? topic.where,
+        claim: String(row.answer ?? ""),
+        topic,
+        qid,
+        previous: topic.questions[qid],
+      });
+      topic.questions[qid] = {
+        state: resolved[2] as FactAnswer["state"],
+        citation: cited?.[1] ?? topic.where,
+        reason: String(row.answer ?? ""),
+      };
+    }
+    await applyVerify(asker, raised, trees.head, (id, supports) => {
+      const hit = raised.find((item) => item.id === id);
+      if (!hit) return;
+      if (!supports) hit.topic.questions[hit.qid] = hit.previous;
+      else if (hit.topic.questions[hit.qid]) hit.topic.questions[hit.qid].verified = true;
+    });
+  }
+
   const anyPoints = topics.some((t) => t.interrogated && ungated(t));
   const containment: Record<string, FactAnswer & { verified?: boolean }> = {};
   if (anyPoints) {
@@ -319,7 +404,12 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       id: "batch",
       root: trees.head,
       ids: [...B_IDS],
-      prompt: prompt(["Containment B1 B2 B3 once for the PR, about lines that can earn points.", B_IDS.map((id) => `${id}: ${QUESTIONS[id]}`).join("\n")]),
+      prompt: prompt([
+        "Containment B1 B2 B3 once for the PR, about the lines that can earn points.",
+        "B1 is yes only if every scoring topic is behind a flag. B2 is yes only if every scoring topic emits a metric or log. B3 is yes only if a test would catch each of them.",
+        topics.filter((t) => t.interrogated).map((t) => [`${t.id} ${t.where}`, region(trees.head, t.where)].join("\n")).join("\n\n"),
+        B_IDS.map((id) => `${id}: ${QUESTIONS[id]}`).join("\n"),
+      ]),
     });
     for (const row of rows) containment[row.id] = row;
     await applyVerify(
@@ -335,11 +425,6 @@ export async function analyze(input: RunInput, asker: Asker): Promise<Record<str
       },
     );
   }
-
-  fillMissing(topics, containment);
-
-  const files = [...new Set(hunks.map((h) => h.file))];
-  const typed = classifyDiff(files, hunks);
 
   return {
     schema: "risk-analysis/v1",
@@ -366,17 +451,17 @@ async function profileAtBase(asker: Asker, root: string): Promise<Record<string,
     phase: 0,
     id: "P1",
     root,
-    prompt: prompt(["Phase 0 at the base SHA. Do not open the diff.", QUESTIONS.P1]),
+    prompt: prompt(["Phase 0 at the base SHA. Do not open the diff. Excerpts are not the whole repo.", profileSources(root), QUESTIONS.P1]),
   });
   const p2 = await ask<Record<string, unknown>>(asker, {
     phase: 0,
     id: "P2",
     root,
-    prompt: prompt(["Phase 0. Five caller classes, each yes or no.", QUESTIONS.P2]),
+    prompt: prompt(["Phase 0. Five caller classes, each yes or no. Excerpts are not the whole repo.", profileSources(root), QUESTIONS.P2]),
   });
   const rest: Record<string, unknown> = {};
   for (const id of ["P3", "P4", "P5", "P6"] as const) {
-    rest[id] = await ask(asker, { phase: 0, id, root, prompt: prompt(["Phase 0.", QUESTIONS[id]]) });
+    rest[id] = await ask(asker, { phase: 0, id, root, prompt: prompt(["Phase 0. Excerpts are not the whole repo.", profileSources(root), QUESTIONS[id]]) });
   }
   const p7 = await ask<Record<string, unknown>>(asker, {
     phase: 0,
@@ -428,10 +513,16 @@ async function applyVerify(
     id: "batch",
     root,
     citation: items.map((i) => i.citation).join(","),
-    prompt: prompt(["Verify each claim against its citation. Return checks or supports:true for all.", JSON.stringify(items)]),
+    prompt: prompt([
+      "Verify each claim against its own cited lines. Return checks, one per id.",
+      "supports is about the state. It is true when the lines show that state. A detail in the reason that sits outside the excerpt does not fail the state.",
+      "supports:true does not verify a batch.",
+      ...items.map((item) => `${item.id}\n${item.claim}\n${region(root, item.citation)}`),
+      `CHECKS ${JSON.stringify(items.map((item) => ({ id: item.id })))}`,
+    ]),
   });
-  if (raw.supports === true) {
-    for (const item of items) set(item.id, true);
+  if (items.length === 1 && raw.supports === true && !Array.isArray(raw.checks)) {
+    set(items[0].id, true);
     return;
   }
   for (const item of items) {

@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { accept, type Asker, type AskSpec } from "./accept.js";
 import { loadEnv } from "./env.js";
 import { P2_CLASSES } from "./questions.js";
-import { snapshot } from "./snapshot.js";
 
 loadEnv();
 
@@ -32,10 +31,6 @@ function agentBin(): string {
   const local = path.join(os.homedir(), ".local", "bin", "cursor-agent");
   if (fs.existsSync(local)) return local;
   return "cursor-agent";
-}
-
-function workspaceFiles(root: string): string {
-  return snapshot(root, 24_000);
 }
 
 function shape(spec: AskSpec): string {
@@ -65,6 +60,9 @@ function shape(spec: AskSpec): string {
   if (spec.id === "batch" && "citation" in spec) return '{"supports":true} or {"checks":[{"id":"D1","supports":true}]}';
   if (spec.phase === 4) {
     return '{"topics":[{"decision_points":["D1"],"description":"...","where":"file.ts:1","kind":"check","direction":"wider","consumer":{"description":"...","citation":"file.ts:1"},"core_path":{"outcome_index":1,"path":"..."}}]}';
+  }
+  if (spec.phase === 5 && spec.id === "probes") {
+    return '{"probes":[{"topic":"T1","question":"...","action":"read file.ts","answer":"...","resolves":"F6 → no"}]}';
   }
   const failure = /\.F\d+$/.test(spec.id) || /^F\d+$/.test(spec.id);
   if (failure) return '{"state":"yes|no|unknown","citation":"file.ts:1","reason":"...","meets_direction":true}';
@@ -100,8 +98,8 @@ function extractJson(text: string): unknown {
 
 function callModel(spec: AskSpec, correction: string): string {
   const prompt = [
-    "Reply with one JSON object. Do not search the disk and do not edit files.",
-    spec.phase === 1 || spec.phase === 2 || spec.phase === 3 ? "" : workspaceFiles(spec.root),
+    "Reply with one JSON object. Do not edit files.",
+    "Answer from the excerpts in the question. A file missing from an excerpt is not evidence that it is absent.",
     "The program that called you parses a single JSON object from your answer.",
     `JSON shape: ${shape(spec)}`,
     "A yes, all, or flag_or_cohort needs citation as path:line. A no or unknown needs reason.",
@@ -122,27 +120,6 @@ function callModel(spec: AskSpec, correction: string): string {
   if (wrapper.is_error) throw new Error(`cursor-agent error: ${wrapper.result ?? "unknown"}`);
   if (!wrapper.result) throw new Error("cursor-agent returned an empty result");
   return wrapper.result;
-}
-
-function fallback(spec: AskSpec): unknown {
-  if (spec.phase === "verify") return { supports: false };
-  if (spec.phase === 1) {
-    return { units: spec.hunks.map((h) => ({ hunk: h.id, unit: null, unit_citation: null, enclosed: false })) };
-  }
-  if (spec.phase === 2) {
-    const hunks = spec.hunks ?? [];
-    return {
-      decisions: hunks.map((h) => ({ hunk: h.id, unit: "unknown", where: `${h.file}:${h.new_start}`, kind: "write" })),
-    };
-  }
-  if (spec.phase === 3 && spec.id === "changes") return { changes: [] };
-  if (spec.phase === 3) return { change: "no", reason: "model did not answer" };
-  if (spec.phase === 4) return { topics: [] };
-  if (spec.phase === 5 && spec.id === "batch") {
-    return { answers: (spec.ids ?? []).map((id) => ({ id, state: "unknown", reason: "model did not answer" })) };
-  }
-  if (spec.phase === 5 || spec.phase === 0) return { state: "unknown", reason: "model did not answer" };
-  return { state: "unknown", reason: "model did not answer" };
 }
 
 /** One Cursor call per question. The key is read from the environment or the repo .env and is not printed. */
@@ -176,8 +153,7 @@ export function cursorAsker(log: (line: string) => void = (line) => {
           if (text) log(`reply: ${text.slice(0, 300).replace(/\s+/g, " ")}`);
         }
       }
-      log(`fallback ${spec.id}: ${last.slice(0, 200)}`);
-      return fallback(spec);
+      throw new Error(`${spec.id} was not a valid answer after 2 tries: ${last}`);
     },
   };
 }

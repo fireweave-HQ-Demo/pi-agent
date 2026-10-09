@@ -32,6 +32,7 @@ interface Topic {
   consumer?: { description?: string; citation?: string | null };
   core_path?: { path?: string | null };
   questions: Record<string, Fact>;
+  probes?: Array<{ question?: string; answer?: string }>;
 }
 
 export interface ScoreResult {
@@ -45,13 +46,34 @@ export interface ScoreResult {
 }
 
 function yes(fact: Fact | undefined, failure = false): boolean {
-  if (!fact || fact.state !== "yes" || fact.verified === false) return false;
+  if (!fact || fact.state !== "yes" || fact.verified !== true) return false;
   if (failure && fact.meets_direction !== true) return false;
   return true;
 }
 
 function reachOf(topic: Topic): number {
-  return REACH_MULT[String(topic.questions.R1?.state ?? "unknown")] ?? 0;
+  const fact = topic.questions.R1;
+  if (!fact || fact.verified !== true) return 0;
+  return REACH_MULT[String(fact.state ?? "unknown")] ?? 0;
+}
+
+function coreOf(topic: Topic): number {
+  const fact = topic.questions.K;
+  if (fact?.state === "yes" && fact.verified === true) return K_MULT.yes;
+  if (fact?.state === "no") return K_MULT.no;
+  return K_MULT.unknown;
+}
+
+function clearReason(topic: Topic): string {
+  if (topic.direction === "narrower") return "narrower";
+  if (topic.change_test !== "yes" || !topic.change_verified) return "change not verified";
+  if (!C_IDS.some((c) => yes(topic.questions[c]))) return "no consequence node yes";
+  const reach = topic.questions.R1;
+  const wouldReach = (REACH_MULT[String(reach?.state ?? "unknown")] ?? 0) > 0;
+  if (wouldReach && reach?.verified !== true) return "reach not verified";
+  if (reachOf(topic) === 0) return "no existing caller";
+  if (!topic.interrogated) return "not interrogated";
+  return "no scoring consequence";
 }
 
 function topicScore(topic: Topic): { score: number; base: string | null; counted: string[] } {
@@ -60,7 +82,7 @@ function topicScore(topic: Topic): { score: number; base: string | null; counted
   if (topic.direction === "narrower") return { score: 0, base: null, counted: [] };
   const candidates = C_IDS.filter((c) => yes(topic.questions[c]));
   if (candidates.length === 0 || reachOf(topic) === 0) return { score: 0, base: null, counted: [] };
-  const k = K_MULT[String(topic.questions.K?.state ?? "unknown")] ?? 1;
+  const k = coreOf(topic);
   const reach = reachOf(topic);
   let best = -1;
   let base: (typeof C_IDS)[number] = candidates[0];
@@ -134,14 +156,20 @@ function card(analysis: Record<string, unknown>, topics: Topic[], partA: number,
     lines.push(`     Base: ${row.base}. Consumer: ${row.t.consumer?.description ?? "none"} ${row.t.consumer?.citation ?? ""}`.trimEnd());
     lines.push(`     Counted: ${row.counted.join(", ") || "none"}`);
     lines.push(`     Core path: ${k}. Reach: ${reach}. Topic score ${row.score}, ${weight}.`);
+    for (const probe of row.t.probes ?? []) {
+      const text = probe.answer || probe.question;
+      if (text) lines.push(`     Look at: ${text}`);
+    }
   });
   lines.push("", "Cleared");
-  const cleared = topics.filter((t) => topicScore(t).score === 0);
-  if (cleared.length === 0) lines.push("  none");
-  for (const t of cleared) {
-    const why = t.direction === "narrower" ? "narrower" : !t.interrogated ? "not interrogated" : t.change_test !== "yes" || !t.change_verified ? "change not verified" : "no scoring consequence";
-    lines.push(`  ${t.id} ${t.where}: ${why}`);
-  }
+  const overflow = topics.filter((t) => !t.interrogated && topicScore({ ...t, interrogated: true }).score > 0);
+  const decisions = (analysis.decision_points as Array<{ id?: string; where?: string; change?: string }> | undefined) ?? [];
+  const unchanged = decisions.filter((d) => d.change === "no");
+  const ambiguous = topics.filter((t) => t.change_test === "ambiguous");
+  const cleared = topics.filter((t) => topicScore(t).score === 0 && !overflow.includes(t) && !ambiguous.includes(t));
+  if (cleared.length === 0 && unchanged.length === 0) lines.push("  none");
+  for (const t of cleared) lines.push(`  ${t.id} ${t.where}: ${clearReason(t)}`);
+  for (const d of unchanged) lines.push(`  ${[d.id, d.where].filter(Boolean).join(" ")}: did not change`);
   const containment = (analysis.containment as Record<string, Fact> | undefined) ?? {};
   lines.push("", "Containment");
   if (partA === 0) lines.push("  none (Part A is 0)");
@@ -151,6 +179,7 @@ function card(analysis: Record<string, unknown>, topics: Topic[], partA: number,
   }
   lines.push("", "Unresolved");
   const unknown: string[] = [];
+  for (const t of ambiguous) unknown.push(`${t.id}: change still ambiguous`);
   for (const t of topics) {
     for (const [id, fact] of Object.entries(t.questions)) {
       if (fact.state === "unknown") unknown.push(`${t.id} ${id}: ${fact.reason ?? ""}`.trim());
@@ -159,16 +188,18 @@ function card(analysis: Record<string, unknown>, topics: Topic[], partA: number,
   for (const id of B_IDS) if (containment[id]?.state === "unknown") unknown.push(`${id}: ${containment[id]?.reason ?? ""}`.trim());
   lines.push(unknown.length ? unknown.map((u) => `  ${u}`).join("\n") : "  none");
   const hunks = (analysis.hunks as unknown[] | undefined) ?? [];
-  const decisions = (analysis.decision_points as unknown[] | undefined) ?? [];
-  const notAsked = topics.filter((t) => !t.interrogated);
+  const profile = analysis.profile as { P1?: Array<{ outcome?: string }> } | undefined;
+  const outcomes = (profile?.P1 ?? []).map((o) => o.outcome).filter(Boolean);
   lines.push(
     "",
     "Coverage",
     `  ${hunks.length} hunks, ${decisions.length} decision points, ${topics.length} topics, ${topics.filter((t) => t.interrogated).length} interrogated (N = ${String(analysis.top_n ?? 6)}).`,
-    `  Not interrogated: ${notAsked.map((t) => `${t.description} (${t.where})`).join("; ") || "none"}.`,
+    `  Not interrogated: ${overflow.map((t) => `${t.description} (${t.where})`).join("; ") || "none"}.`,
     "",
     "Method",
     "  pr-decision-analysis, graph §5 (2026-10-08, placeholder weights). The model set states. This file added the numbers.",
+    `  Profile: ${outcomes.join(" | ") || "profile unknown"}.`,
+    `  Part A ${partA} + Part B ${partB} = ${score}. Verify on every yes. An unverified yes is dropped.`,
   );
   return lines.join("\n") + "\n";
 }

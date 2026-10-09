@@ -110,6 +110,14 @@ function fact(v: unknown, label: string, reach = false): FactAnswer {
   return out;
 }
 
+/** Canned verifiers read CHECKS from the prompt and confirm each id. A batch supports:true is not a second pass. */
+export function verifyChecks(prompt: string): { supports: true } | { checks: Array<{ id: string; supports: boolean }> } {
+  const marker = prompt.lastIndexOf("CHECKS ");
+  if (marker < 0) return { supports: true };
+  const items = JSON.parse(prompt.slice(marker + "CHECKS ".length)) as Array<{ id: string }>;
+  return { checks: items.map((item) => ({ id: item.id, supports: true })) };
+}
+
 export function accept(spec: AskSpec, raw: unknown): unknown {
   if (spec.phase === "verify") {
     const o = obj(raw, spec.id);
@@ -196,6 +204,11 @@ export function accept(spec: AskSpec, raw: unknown): unknown {
     const o = obj(raw, "topics");
     if (!Array.isArray(o.topics)) throw new Error("topics must be a list");
     return o.topics;
+  }
+  if (spec.phase === 5 && spec.id === "probes") {
+    const o = obj(raw, "probes");
+    if (!Array.isArray(o.probes)) throw new Error("probes must be a list");
+    return o.probes;
   }
   if (spec.phase === 5 && spec.id === "batch") {
     const o = obj(raw, "batch");
