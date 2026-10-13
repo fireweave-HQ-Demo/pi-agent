@@ -3,6 +3,7 @@
  * asks skill.md one question at a time through Pi, and writes the card.
  * Cursor is the model provider. The model never sees a weight.
  */
+import "../src/fireweave/start.js"; // FireWeave: must stay the first import
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
