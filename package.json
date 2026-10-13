@@ -8,6 +8,7 @@
     "build": "tsc",
     "test": "tsc && node --test dist/test/*.test.js",
     "analyze": "tsc && node dist/src/cli.js",
+    "comment": "tsc && node dist/src/cli.js --comment",
     "e2e:scripted": "tsc && node dist/src/cli.js --scripted"
   },
   "bin": {

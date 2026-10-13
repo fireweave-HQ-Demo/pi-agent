@@ -28,7 +28,7 @@ npm test
 cp .env.example .env
 ```
 
-Put `CURSOR_API_KEY` in `.env`. Do not commit `.env`.
+Put `CURSOR_API_KEY` in `.env`. Put `GITHUB_TOKEN` in the same file to post the review. Do not commit `.env`.
 
 Install the Cursor CLI so `cursor-agent` is on `PATH`, then:
 
@@ -37,6 +37,12 @@ npm run analyze -- https://github.com/owner/repo/pull/123
 ```
 
 The card is `runs/<owner>__<repo>__<number>/out/card.md`.
+
+Post the reviewer comment on that pull request. This updates the existing comment instead of adding another one:
+
+```bash
+npm run comment -- https://github.com/owner/repo/pull/123
+```
 
 ## Pi session
 
