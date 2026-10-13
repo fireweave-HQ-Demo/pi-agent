@@ -1,3 +1,4 @@
+import "./fireweave/start.js"; // FireWeave: must stay the first import
 import { analyzeUrl } from "./run.js";
 import { runCursorE2E, runIdentityE2E } from "./e2e.js";
 

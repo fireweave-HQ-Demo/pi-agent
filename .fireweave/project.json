@@ -1,0 +1,31 @@
+{
+  "defaultEnvironment": "production",
+  "orgId": "8qv4spoCe9b9KCm1bsNYwevqmcFLX8aD",
+  "projectId": "f86f1eb4-d435-4e0d-90e5-8843637a1a09",
+  "projectName": "gaming_zone",
+  "rolloutReady": {
+    "attestUrl": "https://staging-app-server.fireweave.ai",
+    "rolloutCredentialEnv": "FIREWEAVE_KEY"
+  },
+  "server": {
+    "url": "https://staging-app-server.fireweave.ai"
+  },
+  "surfaces": [
+    {
+      "harnessKind": "package",
+      "metricsClient": "none",
+      "path": ".",
+      "rolloutCredentialEnv": "FIREWEAVE_KEY",
+      "surface": "ts-server",
+      "surfaceId": "sfc_01M4SX8NMQ3K3HXSBFNBM4YW5F",
+      "trackerPath": ".fireweave/stamps.ts",
+      "sdk": {
+        "name": "@fireweaveai/server-sdk",
+        "version": "3.0.0-rc.1",
+        "channel": "staging"
+      },
+      "entrypoint": "src/cli.ts"
+    }
+  ],
+  "version": 2
+}
